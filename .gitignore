@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.env
+config.json
+google-token.json
+client_secret*.json
+events.json
+preferences.json
+*.png

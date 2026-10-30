@@ -1,0 +1,30 @@
+id = "pyrider3/notion-now"
+name = "Notion Now"
+version = "1.2.0"
+plugin_api = 24
+author = "pyrider3"
+license = "MIT"
+icon = "calendar"
+description = "当前日程：合并 Google 日历与 Notion 数据库，显示活动与剩余时间。"
+dependencies = ["python3"]
+tags = ["bar", "panel", "productivity", "calendar"]
+
+[[widget]]
+id = "now"
+entry = "widget.luau"
+
+[widget.actions]
+right = "exec noctalia msg plugin pyrider3/notion-now:agenda all settings"
+
+[[panel]]
+id = "agenda"
+entry = "panel.luau"
+width = 460
+height = 580
+placement = "attached"
+open_near_click = true
+
+
+[[service]]
+id = "switch-notifier"
+entry = "service.luau"

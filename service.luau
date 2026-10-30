@@ -1,0 +1,43 @@
+--!nonstrict
+local preferences = require("./preferences.luau")
+local cache = noctalia.expandPath("~/.local/state/notion-now/events.json")
+local previousTime = nil
+local previousEvents = {}
+function update()
+    local now = noctalia.nowMs() / 1000
+    local raw = noctalia.readFile(cache)
+    local data = raw and noctalia.json.decode(raw)
+    if type(data) ~= "table" then previousTime = nil return end
+    local starts, ends = {}, {}
+    local healthy = now - (data.updated or 0) <= 600
+    local events = {}
+    for _, e in ipairs(data.events or {}) do
+        events[e.id] = e
+        local status = (data.sources or {})[e.provider] or {}
+        if previousTime and now >= previousTime and now - previousTime <= 60
+            and healthy and status.ok and not e.stale and not e.all_day and not e.point then
+            local old = previousEvents[e.id]
+            -- Only a clock crossing a known unchanged boundary triggers a reminder.
+            if old and old.start == e.start and old["end"] == e["end"] then
+                if previousTime < e.start and e.start <= now then table.insert(starts, e.title) end
+                if previousTime < e["end"] and e["end"] <= now then table.insert(ends, e.title) end
+            end
+        end
+    end
+    if preferences.read().notify_switch and (#starts > 0 or #ends > 0) then
+        local lines = {}
+        if #ends > 0 then table.insert(lines, "已结束：" .. table.concat(ends, "、")) end
+        if #starts > 0 then table.insert(lines, "开始：" .. table.concat(starts, "、")) end
+        noctalia.notify("日程切换", table.concat(lines, "\n"))
+    end
+    previousTime, previousEvents = now, events
+end
+function onIpc(event)
+    if event == "health" then
+        update()
+        noctalia.writeFile(noctalia.expandPath("~/.local/state/notion-now/service-health.json"),
+            noctalia.json.encode({ok = true, timestamp = noctalia.nowMs()}))
+    end
+end
+noctalia.setUpdateInterval(5000)
+update()
