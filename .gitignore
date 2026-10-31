@@ -7,3 +7,4 @@ client_secret*.json
 events.json
 preferences.json
 *.png
+alarm.json

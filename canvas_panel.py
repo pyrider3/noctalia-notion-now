@@ -16,6 +16,7 @@ import time
 from zoneinfo import ZoneInfo
 import cairo
 from canvas_engine import Viewport, layout_events
+from alarm_store import AlarmStore, next_time, countdown
 
 STATE = Path(os.environ.get('XDG_STATE_HOME', str(Path.home() / '.local/state'))) / 'notion-now'
 WIDTH, HEIGHT, SCALE = 536, 500, 2
@@ -74,7 +75,23 @@ class Canvas:
         self.last_release = 0
         self.last_input = 0
         self.detail_changed = time.monotonic()
+        self.alarm_store = AlarmStore(STATE)
+        self.alarm_open = False
+        self.alarm_progress = 0.0
+        self.alarm_tick = time.monotonic()
+        self.alarm_error = ""
+        clock = dt.datetime.now() + dt.timedelta(minutes=15)
+        self.alarm_hour, self.alarm_minute = clock.hour, clock.minute
+        self.alarm_field = None
+        self.alarm_buffer = ""
+        self.alarm_replace = True
+        self.key_serial = 0
+        self.alarm_feedback = 0
+        self.alarm_content_key = None
+        self.alarm_content_changed = 0
         self.load()
+        clock = dt.datetime.now(self.tz) + dt.timedelta(minutes=15)
+        self.alarm_hour, self.alarm_minute = clock.hour, clock.minute
 
     def load(self):
         self.data = read(STATE / 'events.json')
@@ -128,6 +145,7 @@ class Canvas:
             self.input_session = event.get('session')
             self.last_down = event.get('down_serial', 0)
             self.last_release = event.get('released_serial', 0)
+            self.key_serial = event.get('key_serial', 0)
             self.view.up()
             self.pressed = False
         new_press = (event.get('down_serial', 0) > 0 and event['down_serial'] != self.last_down) if serial_mode else down and not self.pressed
@@ -137,7 +155,7 @@ class Canvas:
             py = float(event.get('down_y', event.get('y', 0))) * HEIGHT
             self.press_xy = (px, py)
             self.travel = 0
-            self.drag_chart = 92 <= py <= 296
+            self.drag_chart = not self.alarm_open and 92 <= py <= 296
             self.pressed = True
             if self.drag_chart:
                 self.view.down(px, float(event.get('down_time', stamp)))
@@ -153,7 +171,8 @@ class Canvas:
                 self.view.velocity = 0
             if self.pressed and self.travel <= 4 and not event.get("cancelled"):
                 self.view.velocity = 0
-                self.click(x, y)
+                self.click(float(event.get("up_x", event.get("x", 0)))*WIDTH,
+                           float(event.get("up_y", event.get("y", 0)))*HEIGHT)
             self.drag_chart = False
             self.pressed = False
         if not serial_mode:
@@ -161,14 +180,27 @@ class Canvas:
         wheel = event.get('wheel', 0)
         delta = wheel - self.wheel_total
         self.wheel_total = wheel
-        if delta and 88 <= y <= 296:
+        if delta and self.alarm_open:
+            self.alarm_field = None
+            self.alarm_buffer = ""
+            self.alarm_replace = True
+            if 158 <= y <= 270:
+                if x < 328: self.alarm_hour = (self.alarm_hour + (1 if delta > 0 else -1)) % 24
+                else: self.alarm_minute = (self.alarm_minute + (1 if delta > 0 else -1)) % 60
+        elif delta and 88 <= y <= 296:
             self.view.zoom(delta, (x - 24) / (WIDTH - 48))
+        for key in event.get('keys', []):
+            if isinstance(key,dict) and key.get('id',0) > self.key_serial:
+                self.key_serial = key['id']
+                self.alarm_keyboard(key.get('kind'),key.get('value',''))
         self.last_input = stamp
 
     def click(self, x, y):
         for left, top, width, height, action in reversed(self.hitboxes):
             if left <= x <= left + width and top <= y <= top + height:
-                if action == 'now':
+                if action.startswith('alarm:'):
+                    self.alarm_action(action[6:])
+                elif action == 'now':
                     self.manual_selection = False
                     self.select_default()
                     self.view.locate(self.minute(time.time()), 240)
@@ -195,11 +227,89 @@ class Canvas:
                         subprocess.Popen(['xdg-open', url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 return
 
+    def alarm_keyboard(self, kind, value):
+        if not self.alarm_open or self.alarm_store.read().get('status') in ('scheduled','ringing'):
+            return
+        if kind == 'key':
+            key=value.lower().replace(' ', '')
+            if key in ('tab','shift+tab','iso_left_tab','left','right'):
+                if not self.alarm_commit(): return
+                self.alarm_field = 'minute' if self.alarm_field == 'hour' else 'hour'
+                self.alarm_buffer = ''
+                self.alarm_replace = True
+            elif key in ('return','enter','kp_enter'):
+                self.alarm_action('set')
+            elif key in ('ctrl+a','control+a'):
+                self.alarm_replace = True
+            elif key in ('backspace','delete') and self.alarm_field:
+                if self.alarm_replace:self.alarm_buffer = ''
+                else:self.alarm_buffer = self.alarm_buffer[:-1]
+                self.alarm_replace = False
+                self.alarm_error = ''
+            return
+        if not self.alarm_field:self.alarm_field = 'hour'
+        for ch in str(value):
+            if ch == ':':
+                if self.alarm_commit():
+                    self.alarm_field = 'minute'; self.alarm_buffer = ''; self.alarm_replace = True
+            elif ch in '0123456789':
+                if self.alarm_replace or len(self.alarm_buffer)>=2:self.alarm_buffer = ch
+                else:self.alarm_buffer += ch
+                self.alarm_replace = False
+                self.alarm_commit()
+
+    def alarm_commit(self):
+        if not self.alarm_field or self.alarm_replace:return True
+        limit=23 if self.alarm_field == 'hour' else 59
+        if not self.alarm_buffer or int(self.alarm_buffer)>limit:
+            self.alarm_error = '小时需为 00–23' if limit==23 else '分钟需为 00–59'
+            return False
+        setattr(self,'alarm_'+self.alarm_field,int(self.alarm_buffer))
+        self.alarm_error = ''
+        return True
+
+    def alarm_action(self, action):
+        self.alarm_error = ''
+        try:
+            if action == 'toggle':
+                self.alarm_open = not self.alarm_open
+                self.view.up(); self.view.velocity = 0
+            elif action == 'close': self.alarm_open = False
+            elif action.startswith('quick:'):
+                self.alarm_store.schedule(time.time() + int(action.split(':')[1])*60)
+                self.alarm_feedback = time.monotonic()
+            elif action == 'set':
+                if not self.alarm_commit(): return
+                self.alarm_store.schedule(next_time(self.alarm_hour, self.alarm_minute, self.tz))
+                self.alarm_feedback = time.monotonic()
+            elif action == 'cancel': self.alarm_store.cancel()
+            elif action == 'snooze': self.alarm_store.snooze(self.alarm_store.read().get('id'))
+            elif action in ('edit:hour','edit:minute'):
+                if not self.alarm_commit(): return
+                self.alarm_field = action.split(':')[1]
+                self.alarm_buffer = ''
+                self.alarm_replace = True
+            elif action == 'sound': self.alarm_store.sound()
+            elif action == 'hour+': self.alarm_hour = (self.alarm_hour+1)%24
+            elif action == 'hour-': self.alarm_hour = (self.alarm_hour-1)%24
+            elif action == 'minute+': self.alarm_minute = (self.alarm_minute+1)%60
+            elif action == 'minute-': self.alarm_minute = (self.alarm_minute-1)%60
+            if action in ('hour+','hour-','minute+','minute-','close','cancel','toggle') or action.startswith('quick:'):
+                self.alarm_field = None
+                self.alarm_buffer = ''
+                self.alarm_replace = True
+        except (OSError, ValueError):
+            self.alarm_error = '未能保存，请重试'
+
+    def alarm_animating(self):
+        return abs(self.alarm_progress - int(self.alarm_open)) > .001 or time.monotonic()-self.alarm_content_changed < .2
+
     def paint(self, target):
         began = time.perf_counter()
         c = cairo.Context(target)
         c.scale(SCALE, SCALE)
-        c.set_source_rgba(*rgba(BG)); c.paint()
+        c.set_operator(cairo.OPERATOR_SOURCE); c.set_source_rgba(0,0,0,0); c.paint()
+        c.set_operator(cairo.OPERATOR_OVER)
         self.hitboxes = []
 
         def rect(x, y, w, h, fill, radius=0, alpha=1, stroke=None):
@@ -216,6 +326,8 @@ class Canvas:
             else:
                 c.new_path()
 
+        rect(0,0,WIDTH,HEIGHT,BG,28)
+
         def text(value, x, y, size=13, color=TEXT, bold=False, limit=None):
             c.select_font_face('Noto Sans CJK SC', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
             c.set_font_size(size)
@@ -231,7 +343,7 @@ class Canvas:
 
         def button(label, x, y, width, action, bright=False):
             hovered = x <= self.pointer_x <= x+width and y <= self.pointer_y <= y+30
-            rect(x,y,width,30,'#383333' if bright else '#242930',8,1 if hovered else .7,stroke='#54443c' if bright else '#333a43')
+            rect(x,y,width,30,'#383333' if bright else '#242930',15,1 if hovered else .7,stroke='#54443c' if bright else '#333a43')
             c.select_font_face('Noto Sans CJK SC', cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
             c.set_font_size(12)
             tx, ty = centered_text_position(c, label, x, y, width, 30)
@@ -243,6 +355,16 @@ class Canvas:
         today = dt.datetime.fromtimestamp(now,self.tz)
         text('日历，此刻',24,34,21,bold=True)
         text(today.strftime('%m月%d日') + '  ' + '周' + '一二三四五六日'[today.weekday()],24,58,12,MUTED)
+        # Draw the bell as vectors so it shares the existing line weight and palette.
+        button('',268,22,36,'alarm:toggle',self.alarm_open)
+        c.set_source_rgba(*rgba(ACCENT if self.alarm_open else MUTED)); c.set_line_width(1.4)
+        c.move_to(278,43); c.line_to(280,39); c.line_to(280,34)
+        c.curve_to(280,27,292,27,292,34); c.line_to(292,39); c.line_to(294,43); c.close_path(); c.stroke()
+        c.arc(286,45,2,0,math.pi); c.stroke()
+        alarm = self.alarm_store.read()
+        if alarm.get('status') in ('scheduled','ringing'):
+            rect(295,24,5,5,ACCENT,2.5)
+            text(countdown(alarm),155,58,12,ACCENT)
         button('全天',314,22,54,'all')
         button('现在',376,22,54,'now',True)
         button('刷新',438,22,72,'refresh')
@@ -277,7 +399,7 @@ class Canvas:
             active = e['start']<=now<e['end']
             past = e['end']<=now
             color = ACCENT if chosen and active else SLATE
-            rect(left,y,max(2,end-left-2),h,color,6,.45 if past else .95,stroke='#eac6b1' if chosen else '#7a899b')
+            rect(left,y,max(2,end-left-2),h,color,16,.45 if past else .95,stroke='#eac6b1' if chosen else '#7a899b')
             self.hitboxes.append((left,y,max(2,end-left),h,'event:'+e['id']))
             if end-left>42 and h>=32:
                 text(e['title'],left+9,y+22,13,'#242323' if chosen and active else TEXT,True,end-left-18)
@@ -291,7 +413,7 @@ class Canvas:
         c.restore()
         if x0<=current_x<=right:
             pill_x=max(x0,min(right-46,current_x-23))
-            rect(pill_x,82,46,18,ACCENT,5)
+            rect(pill_x,82,46,18,ACCENT,9)
             text(today.strftime('%H:%M'),pill_x+7,95,11,'#272323',True)
         line(24,308,right,308)
         e=next((e for e in self.events if e['id']==self.selected),None)
@@ -302,8 +424,9 @@ class Canvas:
             active=e['start']<=now<e['end']
             state='正在进行' if active else '下一项日程' if e['start']>now else '已结束'
             text(state,24,335,11,ACCENT if active else MUTED)
-            if active:
-                pinned = read(STATE/'preferences.json').get('pinned_event_id') == e['id']
+            display_prefs = read(STATE/'preferences.json')
+            if active and display_prefs.get('display_mode', 'pinned') == 'pinned':
+                pinned = display_prefs.get('pinned_event_id') == e['id']
                 button('取消固定' if pinned else '固定到顶栏', WIDTH-210, 315, 148, 'pin', pinned)
             text(e['title'],24,367,21,bold=True,limit=WIDTH-100)
             self.hitboxes.append((WIDTH-62,338,38,38,'open'))
@@ -328,9 +451,72 @@ class Canvas:
         button('设置',WIDTH-82,451,58,'settings')
         status=self.data.get('sources',{}).get('notion',{})
         text('● '+('已同步' if status.get('ok') else '同步异常 · 使用缓存'),24,491,10,'#8fa99a' if status.get('ok') else ACCENT)
+        # One lightweight drawer; timeline layout stays still underneath.
+        stamp = time.monotonic()
+        delta = min(.05, stamp-self.alarm_tick)
+        self.alarm_tick = stamp
+        self.alarm_progress += (int(self.alarm_open)-self.alarm_progress)*(1-math.exp(-24*delta))
+        if abs(self.alarm_progress-int(self.alarm_open)) < .001:
+            self.alarm_progress = float(self.alarm_open)
+        if self.alarm_progress > 0:
+            progress = self.alarm_progress
+            self.hitboxes = [(0,0,WIDTH,HEIGHT,'alarm:close')]
+            rect(0,0,WIDTH,HEIGHT,'#080a0d',28,.6*progress)
+            c.save(); c.translate(0,-9*(1-progress)); c.push_group()
+            rect(146,86,366,348,PANEL,24,stroke=GRID)
+            text('小闹钟',166,118,18,bold=True)
+            button('×',462,99,30,'alarm:close')
+            active = alarm.get('status') in ('scheduled','ringing')
+            content_key = (alarm.get('id'),alarm.get('status'))
+            if content_key != self.alarm_content_key:
+                self.alarm_content_key = content_key
+                self.alarm_content_changed = stamp
+            ease = min(1,(stamp-self.alarm_content_changed)/.16)
+            ease = 1-(1-ease)**3
+            c.save(); c.translate(0,4*(1-ease)); c.push_group()
+            if active:
+                text('时间到了' if alarm.get('status') == 'ringing' else '距离提醒',166,152,11,MUTED)
+                text(countdown(alarm),166,197,34,ACCENT,True)
+                due = dt.datetime.fromtimestamp(alarm.get('due',now),self.tz)
+                text(due.strftime('%m月%d日 %H:%M')+' 提醒',166,222,12,MUTED)
+                if alarm.get('status') == 'ringing':
+                    button('再提醒 5 分钟',166,245,196,'alarm:snooze',True)
+                    button('关闭',374,245,118,'alarm:cancel')
+                else:
+                    button('取消闹钟',166,245,326,'alarm:cancel')
+            else:
+                text('指定时间 · 点击数字输入',166,151,11,MUTED)
+                for x,label,field in [(166,f'{self.alarm_hour:02d}','hour'),(344,f'{self.alarm_minute:02d}','minute')]:
+                    focused = self.alarm_field == field
+                    rect(x,164,148,62,BG,18,stroke=ACCENT if focused else GRID)
+                    self.hitboxes.append((x,164,148,62,'alarm:edit:'+field))
+                    if focused and not self.alarm_replace:label=self.alarm_buffer or '—'
+                    if focused and self.alarm_replace:rect(x+42,174,64,44,ACCENT,12,.12)
+                    text(label,x+52,207,32,ACCENT,True)
+                    if focused and not self.alarm_replace and int(stamp*2)%2==0:
+                        line(x+103,178,x+103,211,ACCENT)
+                    button('−',x,232,62,'alarm:'+field+'-')
+                    button('+',x+86,232,62,'alarm:'+field+'+')
+                text(':',324,207,28,MUTED)
+                due = dt.datetime.fromtimestamp(next_time(self.alarm_hour,self.alarm_minute,self.tz),self.tz)
+                button(('明天 ' if due.date()!=today.date() else '今天 ')+due.strftime('%H:%M')+' 提醒',166,278,326,'alarm:set',True)
+            if active: quick_y = 301
+            else: quick_y = 327
+            text('快捷设定' if not active else '重新设定',166,quick_y-8,11,MUTED)
+            for x,minutes in [(166,5),(278,15),(390,30)]:
+                button(str(minutes)+' 分钟',x,quick_y,102,'alarm:quick:'+str(minutes))
+            line(166,quick_y+44,492,quick_y+44)
+            button('提示音 '+('开' if alarm.get('sound',True) else '关'),166,quick_y+54,106,'alarm:sound',alarm.get('sound',True))
+            if self.alarm_error:
+                text(self.alarm_error,284,quick_y+74,11,ACCENT)
+            elif stamp-self.alarm_feedback < 2:
+                text('已设好',435,quick_y+74,11,'#8fa99a')
+            c.pop_group_to_source(); c.paint_with_alpha(ease); c.restore()
+            c.pop_group_to_source(); c.paint_with_alpha(progress); c.restore()
         self.frames+=1
+
         self.paint_ms=(time.perf_counter()-began)*1000
-        save(STATE/'canvas-status.json',dict(settings_request=self.settings_request,frames=self.frames,paint_ms=round(self.paint_ms,2),first=round(self.view.first,3),span=round(self.view.span,3),dragging=self.view.dragging,selected=self.selected,updated=now))
+        save(STATE/'canvas-status.json',dict(alarm_open=self.alarm_open,settings_request=self.settings_request,frames=self.frames,paint_ms=round(self.paint_ms,2),first=round(self.view.first,3),span=round(self.view.span,3),dragging=self.view.dragging,selected=self.selected,updated=now))
 
 
 def main():
@@ -374,7 +560,7 @@ def main():
                     canvas.input(inp);old_input=inp.get('seq')
                 moving=canvas.view.step(current-last)
                 last=current
-                if registered and pending and current>=frame_at and (moving or changed or current-canvas.detail_changed < .18 or current-last_paint>=.5):
+                if registered and pending and current>=frame_at and (moving or changed or current-canvas.detail_changed < .18 or canvas.alarm_animating() or current-last_paint>=.5):
                     canvas.paint(surface);surface.flush()
                     # Cairo's native little-endian ARGB is BGRA; the protocol is RGBA.
                     src=memoryview(surface.get_data()).cast('B')

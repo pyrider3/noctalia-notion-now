@@ -72,3 +72,59 @@ class BarCanvasBehavior(unittest.TestCase):
         self.assertFalse(item['show_progress'])
         self.assertEqual(item['badge'],'')
         self.assertTrue(item['title'].startswith('下一项 '))
+
+class DualBarBehavior(unittest.TestCase):
+    def test_two_unique_activities_extra_count_and_end_fallback(self):
+        from bar_canvas import Bar
+        b=Bar();b.prefs={'display_mode':'parallel','pinned_event_id':'b'}
+        b.data={'updated':100,'sources':{'notion':{'ok':True}},'events':[event('a',end=200),event('b',end=300),event('c',end=400)]}
+        item=b.content(100)
+        self.assertEqual(item['id'],'b')
+        self.assertEqual(item['additional'][0]['id'],'c')
+        self.assertEqual(item['additional'][0]['badge'],'+1')
+        self.assertEqual(item['badge'],'')
+        item=b.content(100,steps=1)
+        self.assertEqual((item['id'],item['additional'][0]['id']),('c','a'))
+        item=b.content(250)
+        self.assertNotEqual(item['id'],item['additional'][0]['id'])
+        self.assertEqual(item['additional'][0]['badge'],'')
+        self.assertNotIn('additional',b.content(350))
+        self.assertNotIn('additional',b.content(450))
+
+    def test_dual_width_and_independent_progress_render(self):
+        from bar_canvas import Bar,MAX_WIDTH
+        from unittest.mock import patch
+        b=Bar();b.prefs={'display_mode':'parallel'}
+        b.data={'updated':100,'sources':{'notion':{'ok':True}},'events':[event('a','任务甲',end=200),event('b','这是比较长的第二项任务',end=800)]}
+        item=b.content(100)
+        self.assertNotEqual(item['progress'],item['additional'][0]['progress'])
+        self.assertNotEqual(item['warning'],item['additional'][0]['warning'])
+        self.assertGreater(b.measure(item),b.measure_item(item))
+        self.assertLessEqual(b.measure(item),MAX_WIDTH)
+        b.current=item;b.motion.width=b.measure(item)
+        with patch('bar_canvas.save'):
+            width,pixels=b.paint()
+        self.assertEqual(len(pixels),width*2*28*2*4)
+        b.prefs['show_progress']=False
+        item=b.content(100)
+        self.assertFalse(item['show_progress'])
+        self.assertFalse(item['additional'][0]['show_progress'])
+
+
+class ParallelCountBehavior(unittest.TestCase):
+    def test_configurable_count_clamped_unique_and_overflow(self):
+        from bar_canvas import Bar
+        b=Bar();b.data={'updated':100,'events':[event(str(i),end=200+i) for i in range(7)]}
+        for count in range(1,6):
+            b.prefs={'display_mode':'parallel','max_visible':count}
+            item=b.content(100)
+            entries=[item]+item.get('additional',[])
+            self.assertEqual(len(entries),count)
+            self.assertEqual(len({e['id'] for e in entries}),count)
+            self.assertEqual(entries[-1]['badge'],'+'+str(7-count))
+            self.assertLessEqual(b.measure(item),720)
+        b.prefs['max_visible']=99
+        self.assertEqual(len(b.content(100)['additional']),4)
+        b.data['events']=b.data['events'][:2]
+        self.assertEqual(len(b.content(100)['additional']),1)
+        self.assertEqual(b.content(100)['additional'][-1]['badge'],'')

@@ -1,6 +1,6 @@
 id = "pyrider3/notion-now"
 name = "Notion Now"
-version = "2.2.0"
+version = "2.3.3"
 plugin_api = 43
 author = "pyrider3"
 license = "MIT"
@@ -19,7 +19,7 @@ right = "exec noctalia msg plugin pyrider3/notion-now:agenda all settings"
 [[panel]]
 id = "agenda"
 entry = "panel.luau"
-width = 552
+width = 564
 height = "content"
 max_height = 640
 placement = "attached"

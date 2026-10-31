@@ -74,3 +74,17 @@ assert(stored.accent_color == true)
 assert(hasText(tree,'●  已自动保存'))
 toggle(tree,'主题强调色').props.onChange('false')
 print('Settings save/retry checks passed: failure stays off, retry persists, saved feedback')
+findButton(tree,'顶栏').props.onClick()
+findButton(tree,'同时显示').props.onClick()
+assert(stored.display_mode == 'parallel')
+local function countRow(node)
+ if node.tag == 'row' and node.children and node.children[1] and node.children[1].props.text == '同时显示数量' then return node end
+ for _,child in ipairs(node.children or {}) do local found=countRow(child) if found then return found end end
+end
+local row=countRow(tree)
+assert(row)
+row.children[4].props.onClick()
+assert(stored.max_visible == 3 and prefs.read().max_visible == 3)
+countRow(tree).children[2].props.onClick()
+assert(stored.max_visible == 2)
+print('Parallel mode and configurable count persist correctly')

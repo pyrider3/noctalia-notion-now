@@ -13,7 +13,7 @@ function M.read()
     if type(value) ~= "table" then value = {} end
     return { max_visible = math.max(1, math.min(5, math.floor(tonumber(value.max_visible) or 2))),
         notify_switch = enabled(value.notify_switch),
-        display_mode = value.display_mode == "rotate" and "rotate" or "pinned",
+        display_mode = value.display_mode == "rotate" and "rotate" or ((value.display_mode == "parallel" or value.display_mode == "dual") and "parallel" or "pinned"),
         accent_color = enabled(value.accent_color),
         pinned_event_id = type(value.pinned_event_id) == "string" and value.pinned_event_id or "",
         title_limit = math.max(8, math.min(28, math.floor(tonumber(value.title_limit) or 18))),

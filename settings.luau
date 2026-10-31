@@ -34,14 +34,17 @@ function M.render(prefs, tab, status, saved, callbacks)
     local content = {}
     if tab == "bar" then
         table.insert(content, label("活动如何显示", 16, TEXT, "semibold"))
-        table.insert(content, label("主日程＋重叠数量，滚轮可切换活动。", 12, MUTED))
+        table.insert(content, label("同时显示几项由你设置，超出的活动显示 +N。", 12, MUTED))
         local modes = {}
-        for _, item in ipairs({{"pinned", "主日程"}, {"rotate", "自动轮播"}}) do
+        for _, item in ipairs({{"pinned", "主日程"}, {"parallel", "同时显示"}, {"rotate", "自动轮播"}}) do
             local id = item[1]
             table.insert(modes, ui.button({text = item[2], flexGrow = 1, controlSize = "sm", selected = prefs.display_mode == id,
                 variant = prefs.display_mode == id and "primary" or "ghost", onClick = function() change("display_mode", id) end}))
         end
         table.insert(content, ui.row({gap = 8, paddingV = 6}, modes))
+        if prefs.display_mode == "parallel" then
+            table.insert(content, stepper("同时显示数量", "max_visible", 1, 5, 1, " 项"))
+        end
         table.insert(content, stepper("标题最多显示", "title_limit", 8, 28, 1, " 字"))
         table.insert(content, label("胶囊随内容平滑伸缩，悬停暂停轮播。", 12, MUTED))
         if prefs.display_mode == "rotate" then
@@ -67,12 +70,12 @@ function M.render(prefs, tab, status, saved, callbacks)
         table.insert(content, ui.button({text = "管理 Notion 连接", glyph = "external-link", variant = "secondary", onClick = callbacks.authorize}))
         table.insert(content, ui.button({text = "立即同步", glyph = "refresh", variant = "ghost", onClick = callbacks.refresh}))
     end
-    return ui.column({key = "preferences-v2", width = 536, height = 500, padding = 24, gap = 14, fill = BG, radius = 16}, {
+    return ui.column({key = "preferences-v2", width = 536, height = 500, padding = 24, gap = 14, fill = BG, radius = 28}, {
         ui.row({gap = 12, align = "center"}, {
             ui.column({gap = 4, flexGrow = 1}, {label("偏好设置", 22, TEXT, "bold"), label("日历，此刻", 12, MUTED)}),
             ui.button({text = "返回日程", glyph = "arrow-left", controlSize = "sm", variant = "ghost", onClick = callbacks.back}),
         }),
-        ui.row({gap = 6, fill = "#20252c", radius = 9, padding = 4}, tabs),
+        ui.row({gap = 6, fill = "#20252c", radius = 16, padding = 4}, tabs),
         ui.scroll({key = "settings-" .. tab, flexGrow = 1, gap = 5}, content),
         ui.separator(),
         label(saved == "failed" and "保存失败，请重试" or (saved and "●  已自动保存" or "修改后自动保存"), 12, saved == "failed" and "#e9ad52" or MUTED),

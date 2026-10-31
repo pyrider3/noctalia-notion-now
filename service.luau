@@ -1,6 +1,11 @@
 --!nonstrict
 local preferences = require("./preferences.luau")
 local cache = noctalia.expandPath("~/.local/state/notion-now/events.json")
+if noctalia.readFile(noctalia.expandPath("~/.config/systemd/user/notion-now-alarm.service")) then
+    noctalia.runAsync({"systemctl", "--user", "start", "notion-now-alarm.service"})
+else
+    noctalia.runAsync({"python3", noctalia.pluginDir() .. "/alarm_service.py"})
+end
 local previousTime = nil
 local previousEvents = {}
 function update()

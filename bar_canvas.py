@@ -16,7 +16,7 @@ import cairo
 from canvas_panel import STATE, read, save, rgba
 from bar_model import Selection, WidthMotion
 
-HEIGHT, SCALE, MAX_WIDTH = 28, 2, 430
+HEIGHT, SCALE, MAX_WIDTH = 28, 2, 720
 
 
 class Bar:
@@ -57,11 +57,9 @@ class Bar:
         self.hovered=value.get('hovered',False)
         return delta
 
-    def content(self, now, steps=0):
-        event, active, running = self.selection.choose(self.data,self.prefs,now,self.hovered,steps)
+    def format_event(self, event, running, now):
         status=self.data.get('sources',{}).get('notion',{})
-        outdated=now-self.data.get('updated',0)>600
-        stale=bool(event and (outdated or event.get('stale')))
+        stale=bool(event and (now-self.data.get('updated',0)>600 or event.get('stale')))
         title=event['title'] if event else ('暂无活动' if status.get('connected') else '连接 Notion')
         length=max(8,min(28,int(self.prefs.get('title_limit',18))))
         title=title if len(title)<=length else title[:length]+'…'
@@ -73,38 +71,59 @@ class Bar:
             except (ValueError,KeyError):tz=ZoneInfo('Asia/Shanghai')
             timing=dt.datetime.fromtimestamp(event['start'],tz).strftime('%H:%M')
         else:timing=''
-        badge='+'+str(len(active)-1) if running and len(active)>1 else ''
-        self.description='\n'.join(e['title']+' · '+str(max(1,math.ceil((e['end']-now)/60)))+' 分钟' for e in active)
-        if not self.description:self.description=event['title'] if event else title
-        self.pin=self.prefs.get('pinned_event_id','')
         color=self.skin.get('accent','#edb69b') if self.prefs.get('accent_color',True) not in (False,'false') and running else self.skin.get('text','#e9e9e6')
         progress=0
         warning=False
         if running:
             progress=max(0,min(1,(now-event['start'])/(event['end']-event['start'])))
             warning=self.prefs.get('end_warning',True) not in (False,'false') and status.get('ok') and not stale and event['end']-now<=float(self.prefs.get('end_warning_minutes',5))*60
-        return dict(id=event['id'] if event else title,title=title,timing=timing,badge=badge,color=color,progress=progress,
+        return dict(id=event['id'] if event else title,title=title,timing=timing,badge='',color=color,progress=progress,
                     show_progress=running and self.prefs.get('show_progress',True) not in (False,'false'),warning=warning)
+
+    def content(self, now, steps=0):
+        event, active, running = self.selection.choose(self.data,self.prefs,now,self.hovered,steps)
+        item=self.format_event(event,running,now)
+        additional=[]
+        mode=self.prefs.get('display_mode')
+        count=max(1,min(5,int(self.prefs.get('max_visible',2))))
+        if mode in ('parallel','dual') and running and len(active)>1:
+            ids=[e['id'] for e in active]
+            first=ids.index(event['id'])
+            for offset in range(1,min(count,len(active))):
+                additional.append(self.format_event(active[(first+offset)%len(active)],True,now))
+        if additional:item['additional']=additional
+        visible=1+len(additional)
+        badge='+'+str(len(active)-visible) if running and len(active)>visible else ''
+        (additional[-1] if additional else item)['badge']=badge
+        self.description='\n'.join(e['title']+' · '+str(max(1,math.ceil((e['end']-now)/60)))+' 分钟' for e in active)
+        if not self.description:self.description=event['title'] if event else item['title']
+        self.pin=self.prefs.get('pinned_event_id','')
+        item['identity']=tuple((entry['id'],entry['title']) for entry in [item]+additional)
+        return item
 
     @staticmethod
     def font(c,size,bold=False):
         c.select_font_face('Noto Sans CJK SC',cairo.FONT_SLANT_NORMAL,cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
         c.set_font_size(size)
 
-    def measure(self,item):
+    def measure_item(self,item):
         c=cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32,1,1))
         self.font(c,13)
         width=c.text_extents(item['title']).x_advance
         self.font(c,11)
         width+=c.text_extents(item['timing']).x_advance+12 if item['timing'] else 0
         width+=c.text_extents(item['badge']).x_advance+15 if item['badge'] else 0
-        return max(64,min(MAX_WIDTH,width+8))
+        return max(64,min(430,width+8))
+
+    def measure(self,item):
+        entries=[item]+item.get('additional',[])
+        return min(MAX_WIDTH,sum(self.measure_item(entry) for entry in entries)+18*(len(entries)-1))
 
     def step(self,dt,now):
         if now-self.last_read>.5:self.load(now)
         steps=self.input()
         new=self.content(now,steps)
-        if not self.current or any(new[k]!=self.current[k] for k in ['id','title']):
+        if not self.current or new['identity']!=self.current['identity']:
             self.previous=self.current
             self.current=new
             self.change_at=time.monotonic()
@@ -126,8 +145,10 @@ class Bar:
         c.set_operator(cairo.OPERATOR_SOURCE);c.set_source_rgba(0,0,0,0);c.paint();c.set_operator(cairo.OPERATOR_OVER)
         age=max(0,min(1,(time.monotonic()-self.change_at)/.22))
         ease=age*age*(3-2*age)
-        def draw(item,alpha,dy):
+        def draw_one(item,alpha,dy,left,section_width):
             if not item or alpha<=0:return
+            width=section_width
+            c.save();c.translate(left,0);c.rectangle(0,0,width,HEIGHT);c.clip()
             self.font(c,11)
             badge_width=c.text_extents(item['badge']).x_advance+12 if item['badge'] else 0
             time_width=c.text_extents(item['timing']).x_advance if item['timing'] else 0
@@ -143,12 +164,28 @@ class Bar:
                 for cx,cy,a in [(right-4,9,-math.pi/2),(right-4,18,0),(left+4,18,math.pi/2),(left+4,9,math.pi)]:c.arc(cx,cy,4,a,a+math.pi/2)
                 c.close_path();c.fill()
                 c.set_source_rgba(*rgba(item['color'],alpha*.9));c.move_to(x,17+dy);c.show_text(item['badge'])
+            if item['show_progress']:
+                c.set_source_rgba(*rgba(item['color'],.13*alpha));c.rectangle(0,25,width,2);c.fill()
+                fill='#e9ad52' if item['warning'] else item['color']
+                c.set_source_rgba(*rgba(fill,.8*alpha));c.rectangle(0,25,width*item['progress'],2);c.fill()
+            c.restore()
+        def draw(item,alpha,dy):
+            if not item or alpha<=0:return
+            entries=[item]+item.get('additional',[])
+            available=max(1,width-18*(len(entries)-1))
+            measured=[self.measure_item(entry) for entry in entries]
+            total=sum(measured)
+            left=0
+            for index,(entry,natural) in enumerate(zip(entries,measured)):
+                section_width=available*natural/total
+                draw_one(entry,alpha,dy,left,section_width)
+                left+=section_width
+                if index<len(entries)-1:
+                    c.set_source_rgba(*rgba(item['color'],.22*alpha));c.set_line_width(1)
+                    c.move_to(left+9,7);c.line_to(left+9,21);c.stroke()
+                    left+=18
         draw(self.previous,1-ease,-5*ease)
         draw(self.current,ease if self.previous else 1,5*(1-ease) if self.previous else 0)
-        if self.current and self.current['show_progress']:
-            c.set_source_rgba(*rgba(self.current['color'],.13));c.rectangle(0,25,width,2);c.fill()
-            fill='#e9ad52' if self.current['warning'] else self.current['color']
-            c.set_source_rgba(*rgba(fill,.8));c.rectangle(0,25,width*self.current['progress'],2);c.fill()
         surface.flush()
         raw=memoryview(surface.get_data()).cast('B');out=bytearray(raw)
         out[0::4]=raw[2::4];out[2::4]=raw[0::4]

@@ -13,7 +13,7 @@ settings = home / '.local/state/noctalia/settings.toml'
 units = home / '.config/systemd/user'
 target.mkdir(parents=True, exist_ok=True)
 units.mkdir(parents=True, exist_ok=True)
-for name in ['plugin.toml', 'widget.luau', 'panel.luau', 'service.luau', 'preferences.luau', 'timeline.luau', 'settings.luau', 'canvas_panel.py', 'canvas_engine.py', 'bar_canvas.py', 'bar_model.py', 'calendar_bridge.py']:
+for name in ['plugin.toml', 'widget.luau', 'panel.luau', 'service.luau', 'preferences.luau', 'timeline.luau', 'settings.luau', 'canvas_panel.py', 'canvas_engine.py', 'bar_canvas.py', 'bar_model.py', 'calendar_bridge.py', 'alarm_store.py', 'alarm_service.py']:
     shutil.copy2(source / name, target / name)
 
 script = target / 'calendar_bridge.py'
@@ -50,6 +50,23 @@ UMask=0077
 NoNewPrivileges=true
 ''')
 
+(units / 'notion-now-alarm.service').write_text(f'''[Unit]
+Description=Notion Now independent local alarm
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 {target / 'alarm_service.py'}
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+''')
+
 text = settings.read_text()
 parsed = tomllib.loads(text)
 backup = settings.with_name('settings.toml.bak-notion-now-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
@@ -79,7 +96,7 @@ tomllib.loads(text)
 settings.write_text(text)
 subprocess.run(['noctalia', 'config', 'validate', str(settings)], check=True)
 subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
-subprocess.run(['systemctl', '--user', 'enable', '--now', 'notion-now-sync.timer'], check=True)
+subprocess.run(['systemctl', '--user', 'enable', '--now', 'notion-now-sync.timer', 'notion-now-alarm.service'], check=True)
 subprocess.run(['systemctl', '--user', 'start', 'notion-now-sync.service', 'notion-now-setup.service'], check=True)
 subprocess.run(['noctalia', 'msg', 'plugins', 'update', 'local'], check=True)
 subprocess.run(['noctalia', 'msg', 'plugins', 'enable', plugin], check=True)

@@ -10,7 +10,7 @@ local busy = false
 local opened = false
 local canvasRendered = false
 local canvasState = noctalia.expandPath("~/.local/state/notion-now/")
-local input = {seq = 0, session = noctalia.nowMs(), down_serial = 0, released_serial = 0, pressed = false, x = 0, y = 0, wheel = 0, time = 0}
+local input = {seq = 0, session = noctalia.nowMs(), down_serial = 0, released_serial = 0, pressed = false, x = 0, y = 0, wheel = 0, time = 0, keys = {}, key_serial = 0}
 local function startCanvas()
     noctalia.runAsync({"python3", noctalia.pluginDir() .. "/canvas_panel.py"})
 end
@@ -34,11 +34,14 @@ end
 function canvasUp(x, y)
     input.cancelled = false
     input.released_serial = input.down_serial
+    input.up_x, input.up_y = tonumber(x) or 0, tonumber(y) or 0
     input.pressed = false
     canvasMove(x, y)
     local px, py = input.x * 536, input.y * 500
     local distance = math.abs(input.x - (input.down_x or input.x)) * 536 + math.abs(input.y - (input.down_y or input.y)) * 500
-    if distance <= 5 and px >= 454 and px <= 512 and py >= 451 and py <= 481 then
+    local stateRaw = noctalia.readFile(canvasState .. "canvas-status.json")
+    local state = stateRaw and noctalia.json.decode(stateRaw) or {}
+    if not (type(state) == "table" and state.alarm_open) and distance <= 5 and px >= 454 and px <= 512 and py >= 451 and py <= 481 then
         settingsView = true
         settingsTab = "bar"
         canvasRendered = false
@@ -46,10 +49,23 @@ function canvasUp(x, y)
     end
 end
 function canvasCancel()
+    if not input.pressed then return end
     input.cancelled = true
     input.released_serial = input.down_serial
     input.pressed = false
     sendInput()
+end
+local function canvasKeyboard(kind, value)
+    input.key_serial = input.key_serial + 1
+    table.insert(input.keys, {id = input.key_serial, kind = kind, value = value})
+    if #input.keys > 64 then table.remove(input.keys, 1) end
+    sendInput()
+end
+function canvasText(value)
+    canvasKeyboard("text", tostring(value))
+end
+function canvasKey(value, pressed)
+    if pressed == true or pressed == "true" then canvasKeyboard("key", tostring(value)) end
 end
 function canvasScroll(dx, dy)
     input.wheel = input.wheel + (tonumber(dy) or 0)
@@ -83,10 +99,11 @@ end
 function update()
     if not settingsView then
         if opened and not canvasRendered then
-            panel.render(ui.column({key = "canvas-root", padding = 0, width = 536, height = 500, fill = "#171a1f", radius = 16}, {
+            panel.render(ui.column({key = "canvas-root", padding = 0, width = 536, height = 500, fill = "#171a1f", radius = 28}, {
                 ui.pixelStream({key = "calendar-canvas", path = canvasState .. "canvas.sock", width = 536, height = 500,
-                    radius = 16, onPointerDown = "canvasDown", onPointerMove = "canvasMove", onPointerUp = "canvasUp",
-                    onPointerCancel = "canvasCancel", onScroll = "canvasScroll"}),
+                    radius = 28, onPointerDown = "canvasDown", onPointerMove = "canvasMove", onPointerUp = "canvasUp",
+                    onPointerCancel = "canvasCancel", onScroll = "canvasScroll",
+                    onTextInput = "canvasText", onKeyEvent = "canvasKey"}),
             }))
             canvasRendered = true
         end

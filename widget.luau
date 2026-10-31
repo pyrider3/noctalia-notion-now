@@ -37,7 +37,7 @@ function update()
     local status = raw and noctalia.json.decode(raw) or {}
     if type(status) ~= "table" then status = {} end
     if now - (status.updated or 0) * 1000 > 3000 and now - lastStart > 5000 then start() end
-    local width = math.max(64, math.min(430, tonumber(status.width) or 100))
+    local width = math.max(64, math.min(720, tonumber(status.width) or 100))
     if width ~= lastWidth or color ~= lastColor then
         barWidget.render(ui.row({key = "primary-activity", gap = 6, align = "center"}, {
             ui.glyph({name = "calendar", size = 16, color = color}),
