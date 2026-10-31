@@ -3,7 +3,6 @@
 import argparse
 import datetime as dt
 import fcntl
-import hashlib
 import html
 import http.server
 import json
@@ -101,22 +100,6 @@ def parse_time(value, timezone, hint=None):
     return parsed.timestamp()
 
 
-def normalize_google(raw, calendar_id, name, timezone):
-    if raw.get('status') == 'cancelled':
-        return None
-    if any(x.get('self') and x.get('responseStatus') == 'declined' for x in raw.get('attendees', [])):
-        return None
-    start, end = raw.get('start', {}), raw.get('end', {})
-    all_day = 'date' in start
-    start_ts = parse_time(start.get('dateTime') or start.get('date'), timezone, start.get('timeZone'))
-    end_ts = parse_time(end.get('dateTime') or end.get('date'), timezone, end.get('timeZone'))
-    if start_ts is None or end_ts is None:
-        return None
-    return {'id': 'google:' + calendar_id + ':' + raw['id'], 'provider': 'google',
-            'calendar': name, 'title': raw.get('summary') or '未命名活动', 'start': start_ts,
-            'end': end_ts, 'all_day': all_day, 'point': False, 'url': raw.get('htmlLink', '')}
-
-
 def notion_title(items):
     return ''.join(x.get('plain_text', x.get('text', {}).get('content', '')) for x in items)
 
@@ -134,7 +117,7 @@ def normalize_notion(page, date_property, name, timezone):
     point = not all_day and not date.get('end')
     end = parse_time(date.get('end'), timezone, date.get('time_zone'))
     if all_day:
-        # Notion date ranges include the final date; Google end dates are exclusive.
+        # Notion date ranges include the final date.
         last = dt.date.fromisoformat(date.get('end') or date['start'])
         end = dt.datetime.combine(last + dt.timedelta(days=1), dt.time(), timezone).timestamp()
     elif point:
@@ -144,34 +127,6 @@ def normalize_notion(page, date_property, name, timezone):
     return {'id': 'notion:' + page['id'], 'provider': 'notion', 'calendar': name,
             'title': title or '未命名活动', 'start': start, 'end': end, 'all_day': all_day,
             'point': point, 'url': page.get('url', '')}
-
-
-def google_events(config, timezone, begin, finish):
-    google = config.get('google', {})
-    token = read_json(CONFIG_DIR / 'google-token.json')
-    client = google.get('client', {})
-    if not token.get('refresh_token') or not client.get('client_id'):
-        raise CalendarError('尚未连接 Google 日历')
-    refreshed = request_json('https://oauth2.googleapis.com/token', body={
-        'client_id': client['client_id'], 'client_secret': client.get('client_secret', ''),
-        'refresh_token': token['refresh_token'], 'grant_type': 'refresh_token'}, form=True)
-    headers = {'Authorization': 'Bearer ' + refreshed['access_token']}
-    calendars = paged('https://www.googleapis.com/calendar/v3/users/me/calendarList', headers)
-    selected = google.get('calendar_ids', [])
-    events = []
-    for calendar in calendars:
-        if selected and calendar['id'] not in selected:
-            continue
-        if not selected and calendar.get('hidden'):
-            continue
-        params = urllib.parse.urlencode({'timeMin': begin.isoformat(), 'timeMax': finish.isoformat(),
-            'singleEvents': 'true', 'orderBy': 'startTime', 'maxResults': 2500})
-        url = 'https://www.googleapis.com/calendar/v3/calendars/' + urllib.parse.quote(calendar['id'], safe='') + '/events?' + params
-        for raw in paged(url, headers):
-            event = normalize_google(raw, calendar['id'], calendar.get('summary', 'Google'), timezone)
-            if event:
-                events.append(event)
-    return events
 
 
 def resolve_database_id(value):
@@ -250,11 +205,11 @@ def sync():
         finish = begin + dt.timedelta(days=2)
         previous = read_json(CACHE)
         events, statuses = [], {}
-        for provider, fetch in [('google', google_events), ('notion', notion_events)]:
+        for provider, fetch in [('notion', notion_events)]:
             connected = bool(config.get(provider, {}))
             try:
                 if not connected:
-                    raise CalendarError('尚未连接 ' + ('Google 日历' if provider == 'google' else 'Notion 数据库'))
+                    raise CalendarError('尚未连接 ' + 'Notion 数据库')
                 fetched = fetch(config, timezone, begin, finish)
                 statuses[provider] = {'ok': True, 'connected': True, 'updated': time.time(), 'message': '已同步'}
                 for event in fetched:
@@ -275,7 +230,7 @@ def sync():
 def setup_page(message='', csrf=''):
     config = read_json(CONFIG)
     source_status = read_json(CACHE).get('sources', {})
-    status = ' · '.join(('Google' if k == 'google' else 'Notion') + '：' + v['message'] for k, v in source_status.items())
+    status = 'Notion：' + source_status.get('notion', {}).get('message', '尚未连接')
     notion = config.get('notion', {})
     source_text = '\n'.join(x['id'] + (' | ' + x['date_property'] if x.get('date_property') else '') for x in notion.get('sources', []))
     return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -286,9 +241,9 @@ main{max-width:780px;margin:56px auto;padding:0 24px}h1{font-size:32px;margin-bo
 label{display:block;margin:14px 0 6px}input,textarea{width:100%;background:#12150f;color:#e5e9df;border:1px solid #424b3c;border-radius:10px;padding:12px;font:14px monospace}
 button{border:0;border-radius:10px;padding:12px 18px;background:#c1d6a6;color:#17200e;font-weight:700;font-size:15px;cursor:pointer}
 a{color:#c1d6a6}.note{color:#d5dda4;padding:14px 0}.row{display:flex;gap:12px;align-items:center}code{color:#d5dda4}
-</style><main><h1>日历，此刻</h1><div class="muted">连接 Google 日历与 Notion 数据库，让顶栏显示现在的安排。</div>
+</style><main><h1>日历，此刻</h1><div class="muted">连接 Notion 数据库，让顶栏显示现在的安排。</div>
 <div class="note">''' + html.escape(message or status or '插件已安装，等待连接日历。') + '''</div>
-<section class="card"><h2>1 · Notion 数据库</h2><p>创建仅有读取内容权限的内部集成，然后在需要显示的数据库中，通过「连接」添加这个集成。</p>
+<section class="card"><h2>Notion 数据库</h2><p>创建仅有读取内容权限的内部集成，然后在需要显示的数据库中，通过「连接」添加这个集成。</p>
 <p><a href="https://www.notion.so/profile/integrations" target="_blank" rel="noreferrer">打开 Notion 集成管理 ↗</a></p>
 <form method="post" action="/notion"><input type="hidden" name="csrf" value="''' + csrf + '''">
 <label for="token">集成密钥</label><input id="token" type="password" name="token" autocomplete="off" placeholder="''' + ('已保存；留空保留现有密钥' if notion.get('token') else '粘贴 Notion integration secret') + '''">
@@ -296,21 +251,12 @@ a{color:#c1d6a6}.note{color:#d5dda4;padding:14px 0}.row{display:flex;gap:12px;al
 <textarea id="databases" name="databases" rows="3" placeholder="数据库链接 | 日期字段名称（只有一个日期字段时可省略）">''' + html.escape(source_text) + '''</textarea>
 <small>如有多个日期字段，请写成：数据库链接 | 日期。选择与 Notion Calendar 中相同的日期字段。</small>
 <p><button>保存并同步 Notion</button></p></form></section>
-<section class="card"><h2>2 · Google 日历</h2><p>使用 Google 官方 OAuth，仅申请读取日历列表和活动权限。需要你自己的「桌面应用」OAuth 客户端 JSON。</p>
-<p><a href="https://console.cloud.google.com/apis/library/calendar-json.googleapis.com" target="_blank" rel="noreferrer">启用 Google Calendar API ↗</a> ·
-<a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noreferrer">创建桌面应用客户端 ↗</a></p>
-<p class="muted">若应用处于测试状态，请把你的 Google 账号添加为测试用户；测试模式的授权可能需要定期重连。</p>
-<form method="post" action="/google"><input type="hidden" name="csrf" value="''' + csrf + '''">
-<label for="client">桌面应用客户端 JSON</label><textarea id="client" name="client" rows="4" placeholder="''' + ('已保存；留空使用现有客户端' if config.get('google', {}).get('client') else '粘贴下载的 JSON 内容，包含 installed 字段') + '''"></textarea>
-<label for="calendars">只显示这些日历 ID（可留空，读取账号中未隐藏的日历）</label><input id="calendars" name="calendars" value="''' + html.escape(','.join(config.get('google', {}).get('calendar_ids', [])), quote=True) + '''" placeholder="多个 ID 用逗号分隔">
-<p><button>前往 Google 只读授权</button></p></form></section>
 <p class="muted">密钥只保存在本机权限为 600 的配置文件中。插件每两分钟同步，在活动起止时间自动切换。
 全天活动不会占用「正在进行」；没有结束时间的任务只显示时间点，不推测持续时长。</p></main></html>'''
 
 
 def serve(open_browser=False):
     csrf = secrets.token_urlsafe(32)
-    oauth = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -322,7 +268,7 @@ def serve(open_browser=False):
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Frame-Options', 'DENY')
-            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://accounts.google.com; base-uri 'none'; frame-ancestors 'none'")
+            self.send_header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
             self.end_headers()
             self.wfile.write(body)
 
@@ -334,29 +280,7 @@ def serve(open_browser=False):
                 self.send_error(403)
                 return
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == '/oauth/callback':
-                query = urllib.parse.parse_qs(parsed.query)
-                if not oauth.get('state') or not secrets.compare_digest(query.get('state', [''])[0], oauth['state']):
-                    self.reply('授权校验失败，请重新连接', 400)
-                    return
-                oauth.pop('state', None)
-                if 'error' in query or 'code' not in query:
-                    self.reply('Google 授权未完成，可以稍后重新连接。')
-                    return
-                try:
-                    client = read_json(CONFIG)['google']['client']
-                    token = request_json('https://oauth2.googleapis.com/token', body={
-                        'code': query['code'][0], 'client_id': client['client_id'],
-                        'client_secret': client.get('client_secret', ''), 'redirect_uri': callback,
-                        'code_verifier': oauth.pop('verifier'), 'grant_type': 'authorization_code'}, form=True)
-                    if not token.get('refresh_token'):
-                        raise CalendarError('Google 未返回长期授权，请重新连接')
-                    save_json(CONFIG_DIR / 'google-token.json', {'refresh_token': token['refresh_token']})
-                    threading.Thread(target=sync, daemon=True).start()
-                    self.reply('Google 日历已连接，正在同步。稍后刷新即可查看连接状态。')
-                except (CalendarError, KeyError) as e:
-                    self.reply(str(e) if isinstance(e, CalendarError) else '授权响应异常，请重新连接', 400)
-            elif parsed.path == '/':
+            if parsed.path == '/':
                 self.reply()
             else:
                 self.send_error(404)
@@ -392,31 +316,11 @@ def serve(open_browser=False):
                     save_json(CONFIG, config)
                     threading.Thread(target=sync, daemon=True).start()
                     self.reply('Notion 设置已保存，正在检查权限并同步。稍后刷新查看结果。')
-                elif self.path == '/google':
-                    client = json.loads(value('client')).get('installed', {}) if value('client') else config.get('google', {}).get('client', {})
-                    if not client.get('client_id') or not client.get('client_secret'):
-                        raise CalendarError('请填入 Google「桌面应用」OAuth 客户端 JSON')
-                    # Do not use endpoints supplied in uploaded JSON.
-                    config['google'] = {'client': {'client_id': client['client_id'], 'client_secret': client['client_secret']},
-                        'calendar_ids': [x.strip() for x in value('calendars').split(',') if x.strip()]}
-                    save_json(CONFIG, config)
-                    oauth['state'] = secrets.token_urlsafe(32)
-                    oauth['verifier'] = secrets.token_urlsafe(64)
-                    import base64
-                    challenge = base64.urlsafe_b64encode(hashlib.sha256(oauth['verifier'].encode()).digest()).decode().rstrip('=')
-                    query = urllib.parse.urlencode({'client_id': client['client_id'], 'redirect_uri': callback,
-                        'response_type': 'code', 'scope': 'https://www.googleapis.com/auth/calendar.events.readonly https://www.googleapis.com/auth/calendar.calendarlist.readonly',
-                        'access_type': 'offline', 'prompt': 'consent', 'state': oauth['state'],
-                        'code_challenge': challenge, 'code_challenge_method': 'S256'})
-                    self.send_response(303)
-                    self.send_header('Location', 'https://accounts.google.com/o/oauth2/v2/auth?' + query)
-                    self.end_headers()
                 else:
                     self.send_error(404)
             except (CalendarError, ValueError):
-                self.reply('设置格式不正确，请检查密钥、数据库链接和 OAuth 客户端 JSON。', 400)
+                self.reply('设置格式不正确，请检查密钥和数据库链接。', 400)
 
-    callback = 'http://127.0.0.1:18743/oauth/callback'
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 18743), Handler)
     if open_browser:
         import webbrowser

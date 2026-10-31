@@ -13,12 +13,12 @@ settings = home / '.local/state/noctalia/settings.toml'
 units = home / '.config/systemd/user'
 target.mkdir(parents=True, exist_ok=True)
 units.mkdir(parents=True, exist_ok=True)
-for name in ['plugin.toml', 'widget.luau', 'panel.luau', 'service.luau', 'preferences.luau', 'calendar_bridge.py']:
+for name in ['plugin.toml', 'widget.luau', 'panel.luau', 'service.luau', 'preferences.luau', 'timeline.luau', 'settings.luau', 'canvas_panel.py', 'canvas_engine.py', 'bar_canvas.py', 'bar_model.py', 'calendar_bridge.py']:
     shutil.copy2(source / name, target / name)
 
 script = target / 'calendar_bridge.py'
 (units / 'notion-now-sync.service').write_text(f'''[Unit]
-Description=Read-only Google and Notion calendar sync
+Description=Read-only Notion calendar sync
 After=network-online.target
 
 [Service]

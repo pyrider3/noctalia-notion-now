@@ -34,13 +34,6 @@ class Calendars(unittest.TestCase):
         self.assertEqual(b.select_events([event], event['start'])[0], [])
         self.assertTrue(b.overlaps(event, event['start'] - 1, event['start'] + 1))
 
-    def test_google_cancelled_declined_and_recurring_instance(self):
-        raw = {'id': 'repeat_20261007', 'summary': '例会', 'start': {'dateTime': '2026-10-07T10:00:00+08:00'},
-            'end': {'dateTime': '2026-10-07T11:00:00+08:00'}, 'recurringEventId': 'repeat'}
-        self.assertIsNotNone(b.normalize_google(raw, 'a', '工作', TZ))
-        self.assertIsNone(b.normalize_google(dict(raw, status='cancelled'), 'a', '工作', TZ))
-        self.assertIsNone(b.normalize_google(dict(raw, attendees=[{'self': True, 'responseStatus': 'declined'}]), 'a', '工作', TZ))
-
     def test_long_running_range(self):
         event = b.normalize_notion(self.notion('2026-10-01T10:00:00+08:00', '2026-10-10T10:00:00+08:00'), 'Date', '工作', TZ)
         self.assertTrue(b.overlaps(event, b.parse_time('2026-10-07', TZ), b.parse_time('2026-10-08', TZ)))
@@ -64,16 +57,17 @@ class Calendars(unittest.TestCase):
             folder = Path(tmp)
             config, cache = folder / 'config/config.json', folder / 'state/events.json'
             now = dt.datetime.now(TZ).timestamp()
-            event = {'id': 'google:a:one', 'provider': 'google', 'start': now - 60, 'end': now + 600}
-            b.save_json(config, {'google': {'client': {}}})
-            b.save_json(cache, {'events': [event], 'sources': {'google': {'updated': now - 300}}})
+            event = {'id': 'notion:one', 'provider': 'notion', 'start': now - 60, 'end': now + 600}
+            b.save_json(config, {'notion': {'token': 'test'}})
+            b.save_json(cache, {'events': [event], 'sources': {'notion': {'updated': now - 300}}})
             with patch.object(b, 'CONFIG', config), patch.object(b, 'CACHE', cache), patch.object(b, 'STATE_DIR', cache.parent), \
-                 patch.object(b, 'google_events', side_effect=b.CalendarError('网络失败')):
+                 patch.object(b, 'notion_events', side_effect=b.CalendarError('网络失败')):
                 b.sync()
             saved = b.read_json(cache)
             self.assertTrue(saved['events'][0]['stale'])
-            self.assertFalse(saved['sources']['google']['ok'])
-            self.assertFalse(saved['sources']['notion']['connected'])
+            self.assertFalse(saved['sources']['notion']['ok'])
+            self.assertTrue(saved['sources']['notion']['connected'])
+            self.assertNotIn('google', saved['sources'])
             self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
     def test_database_id_from_url(self):
